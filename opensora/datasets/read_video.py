@@ -65,22 +65,63 @@ def read_video_av(
 
     # == get video info ==
     info = {}
+
+    # Try using decord first as it's faster and has fewer memory leaks,
+    # fallback to pyav if it fails.
+    try:
+        import decord
+        decord.bridge.set_bridge("torch")
+        vr = decord.VideoReader(filename)
+        info["video_fps"] = vr.get_avg_fps()
+        total_frames = len(vr)
+        # Check start and end pts to get the frame range
+        if pts_unit == "sec":
+            fps = info["video_fps"]
+            start_frame = int(math.floor(start_pts * fps))
+            if end_pts != float("inf"):
+                end_frame = int(math.ceil(end_pts * fps))
+            else:
+                end_frame = total_frames
+        else:
+            start_frame = start_pts
+            if end_pts != float("inf"):
+                end_frame = end_pts
+            else:
+                end_frame = total_frames
+
+        start_frame = max(0, start_frame)
+        end_frame = min(total_frames, end_frame)
+
+        frames = vr.get_batch(range(start_frame, end_frame))
+        vframes = frames.clone()
+        del frames
+        del vr
+
+        if output_format == "TCHW":
+            # [T,H,W,C] --> [T,C,H,W]
+            vframes = vframes.permute(0, 3, 1, 2)
+
+        aframes = torch.empty((1, 0), dtype=torch.float32)
+        return vframes, aframes, info
+    except Exception as e:
+        pass
+
     # TODO: creating an container leads to memory leak (1G for 8 workers 1 GPU)
-    container = av.open(filename, metadata_errors="ignore")
+    # NOTE: using thread_type="AUTO" might prevent some memory leaks, but keeping it simple for now
+    container = av.open(filename)
     # fps
     video_fps = container.streams.video[0].average_rate
     # guard against potentially corrupted files
     if video_fps is not None:
         info["video_fps"] = float(video_fps)
-    iter_video = container.decode(**{"video": 0})
-    frame = next(iter_video).to_rgb().to_ndarray()
-    height, width = frame.shape[:2]
+
+    height = container.streams.video[0].codec_context.height
+    width = container.streams.video[0].codec_context.width
+
     total_frames = container.streams.video[0].frames
     if total_frames == 0:
         total_frames = MAX_NUM_FRAMES
         warnings.warn(f"total_frames is 0, using {MAX_NUM_FRAMES} as a fallback")
-    container.close()
-    del container
 
     # HACK: must create before iterating stream
     # use np.zeros will not actually allocate memory
@@ -89,8 +130,6 @@ def read_video_av(
 
     # == read ==
     try:
-        # TODO: The reading has memory leak (4G for 8 workers 1 GPU)
-        container = av.open(filename, metadata_errors="ignore")
         assert container.streams.video is not None
         video_frames = _read_from_stream(
             video_frames,
@@ -104,6 +143,9 @@ def read_video_av(
         )
     except av.AVError as e:
         print(f"[Warning] Error while reading video {filename}: {e}")
+
+    container.close()
+    del container
 
     vframes = torch.from_numpy(video_frames).clone()
     del video_frames
@@ -186,8 +228,6 @@ def _read_from_stream(
         print(f"[Warning] Error while reading video {filename}: {e}")
 
     # garbage collection for thread leakage
-    container.close()
-    del container
     # NOTE: manually garbage collect to close pyav threads
     gc.collect()
 
