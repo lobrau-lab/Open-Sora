@@ -71,13 +71,26 @@ def read_file(input_path, memory_efficient=False):
 
 
 def download_url(input_path):
+    from urllib.parse import urlparse
+    parsed_url = urlparse(input_path)
+    if parsed_url.scheme not in ("http", "https"):
+        raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}. Only http and https are allowed.")
+
     output_dir = "cache"
     os.makedirs(output_dir, exist_ok=True)
-    base_name = os.path.basename(input_path)
+
+    base_name = os.path.basename(parsed_url.path)
+    if not base_name:
+        base_name = "downloaded_file"
+
     output_path = os.path.join(output_dir, base_name)
-    img_data = requests.get(input_path).content
-    with open(output_path, "wb", encoding="utf-8") as handler:
-        handler.write(img_data)
+
+    response = requests.get(input_path, timeout=10)
+    response.raise_for_status()
+
+    with open(output_path, "wb") as handler:
+        handler.write(response.content)
+
     print(f"URL {input_path} downloaded to {output_path}")
     return output_path
 
