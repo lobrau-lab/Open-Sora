@@ -1,0 +1,285 @@
+diff --git a/scripts/vae/train.py b/scripts/vae/train.py
+index 9fbcc92..c4c48dc 100644
+--- a/scripts/vae/train.py
++++ b/scripts/vae/train.py
+@@ -53,64 +53,8 @@ my_schedule = schedule(
+ )
+
+
+-def main():
+-    # ======================================================
+-    # 1. configs & runtime variables
+-    # ======================================================
+-    # == parse configs ==
+-    cfg = parse_configs()
+-
+-    # == get dtype & device ==
+-    dtype = to_torch_dtype(cfg.get("dtype", "bf16"))
+-    device, coordinator = setup_device()
+-    checkpoint_io = CheckpointIO()
+-    set_seed(cfg.get("seed", 1024))
+-    PinMemoryCache.force_dtype = dtype
+-    pin_memory_cache_pre_alloc_numels = cfg.get("pin_memory_cache_pre_alloc_numels", None)
+-    PinMemoryCache.pre_alloc_numels = pin_memory_cache_pre_alloc_numels
+-
+-    # == init ColossalAI booster ==
+-    plugin_type = cfg.get("plugin", "zero2")
+-    plugin_config = cfg.get("plugin_config", {})
+-    plugin = (
+-        create_colossalai_plugin(
+-            plugin=plugin_type,
+-            dtype=cfg.get("dtype", "bf16"),
+-            grad_clip=cfg.get("grad_clip", 0),
+-            **plugin_config,
+-        )
+-        if plugin_type != "none"
+-        else None
+-    )
+-    booster = Booster(plugin=plugin)
+-
+-    # == init exp_dir ==
+-    exp_name, exp_dir = create_experiment_workspace(
+-        cfg.get("outputs", "./outputs"),
+-        model_name=config_to_name(cfg),
+-        config=cfg.to_dict(),
+-    )
+-    if is_log_process(plugin_type, plugin_config):
+-        print(f"changing {exp_dir} to share")
+-        os.system(f"chgrp -R share {exp_dir}")
+
+-    # == init logger, tensorboard & wandb ==
+-    logger = create_logger(exp_dir)
+-    logger.info("Training configuration:\n %s", pformat(cfg.to_dict()))
+-    tb_writer = None
+-    if coordinator.is_master():
+-        tb_writer = create_tensorboard_writer(exp_dir)
+-        if cfg.get("wandb", False):
+-            wandb.init(
+-                project=cfg.get("wandb_project", "Open-Sora"),
+-                name=cfg.get("wandb_expr_name", exp_name),
+-                config=cfg.to_dict(),
+-                dir=exp_dir,
+-            )
+-
+-    # ======================================================
+-    # 2. build dataset and dataloader
+-    # ======================================================
++def build_dataset_and_dataloader(cfg, pin_memory_cache_pre_alloc_numels, logger):
+     logger.info("Building dataset...")
+     # == build dataset ==
+     dataset = build_module(cfg.dataset, DATASETS)
+@@ -136,10 +80,10 @@ def main():
+         **dataloader_args,
+     )
+     num_steps_per_epoch = len(dataloader)
++    return dataloader, sampler, num_steps_per_epoch, cache_pin_memory
+
+-    # ======================================================
+-    # 3. build model
+-    # ======================================================
++
++def build_models_and_optimizers(cfg, device, dtype, num_steps_per_epoch, logger):
+     logger.info("Building models...")
+
+     # == build vae model ==
+@@ -166,6 +110,10 @@ def main():
+         log_model_params(discriminator)
+         generator_loss_fn = GeneratorLoss(**cfg.gen_loss_config)
+         discriminator_loss_fn = DiscriminatorLoss(**cfg.disc_loss_config)
++    else:
++        discriminator = None
++        generator_loss_fn = None
++        discriminator_loss_fn = None
+
+     # == setup optimizer ==
+     optimizer = create_optimizer(model, cfg.optim)
+@@ -184,9 +132,43 @@ def main():
+             epochs=cfg.get("epochs", 1000),
+             **cfg.disc_lr_scheduler,
+         )
+-
+-    # =======================================================
+-    # 4. distributed training preparation with colossalai
++    else:
++        disc_optimizer = None
++        disc_lr_scheduler = None
++
++    return model, ema, ema_shape_dict, discriminator, vae_loss_fn, generator_loss_fn, discriminator_loss_fn, optimizer, lr_scheduler, disc_optimizer, disc_lr_scheduler, use_discriminator
++
++
++def train_loop(
++    cfg,
++    booster,
++    model,
++    ema,
++    ema_shape_dict,
++    discriminator,
++    vae_loss_fn,
++    generator_loss_fn,
++    discriminator_loss_fn,
++    optimizer,
++    lr_scheduler,
++    disc_optimizer,
++    disc_lr_scheduler,
++    dataloader,
++    sampler,
++    num_steps_per_epoch,
++    cache_pin_memory,
++    device,
++    dtype,
++    coordinator,
++    logger,
++    tb_writer,
++    checkpoint_io,
++    exp_dir,
++    plugin_type,
++    plugin_config,
++    use_discriminator,
++    my_schedule,
++):
+     # =======================================================
+     logger.info("Preparing for distributed training...")
+     # == boosting ==
+@@ -592,6 +574,142 @@ def main():
+         sampler.reset()
+         start_step = 0
+
++def main():
++    # ======================================================
++    # 1. configs & runtime variables
++    # ======================================================
++    # == parse configs ==
++    cfg = parse_configs()
++
++    # == get dtype & device ==
++    dtype = to_torch_dtype(cfg.get("dtype", "bf16"))
++    device, coordinator = setup_device()
++    checkpoint_io = CheckpointIO()
++    set_seed(cfg.get("seed", 1024))
++    PinMemoryCache.force_dtype = dtype
++    pin_memory_cache_pre_alloc_numels = cfg.get("pin_memory_cache_pre_alloc_numels", None)
++    PinMemoryCache.pre_alloc_numels = pin_memory_cache_pre_alloc_numels
++
++    # == init ColossalAI booster ==
++    plugin_type = cfg.get("plugin", "zero2")
++    plugin_config = cfg.get("plugin_config", {})
++    plugin = (
++        create_colossalai_plugin(
++            plugin=plugin_type,
++            dtype=cfg.get("dtype", "bf16"),
++            grad_clip=cfg.get("grad_clip", 0),
++            **plugin_config,
++        )
++        if plugin_type != "none"
++        else None
++    )
++    booster = Booster(plugin=plugin)
++
++    # == init exp_dir ==
++    exp_name, exp_dir = create_experiment_workspace(
++        cfg.get("outputs", "./outputs"),
++        model_name=config_to_name(cfg),
++        config=cfg.to_dict(),
++    )
++    if is_log_process(plugin_type, plugin_config):
++        print(f"changing {exp_dir} to share")
++        os.system(f"chgrp -R share {exp_dir}")
++
++    # == init logger, tensorboard & wandb ==
++    logger = create_logger(exp_dir)
++    logger.info("Training configuration:\n %s", pformat(cfg.to_dict()))
++    tb_writer = None
++    if coordinator.is_master():
++        tb_writer = create_tensorboard_writer(exp_dir)
++        if cfg.get("wandb", False):
++            wandb.init(
++                project=cfg.get("wandb_project", "Open-Sora"),
++                name=cfg.get("wandb_expr_name", exp_name),
++                config=cfg.to_dict(),
++                dir=exp_dir,
++            )
++
++    # ======================================================
++    # 2. build dataset and dataloader
++    # ======================================================
++    dataloader, sampler, num_steps_per_epoch, cache_pin_memory = build_dataset_and_dataloader(
++        cfg, pin_memory_cache_pre_alloc_numels, logger
++    )
++
++    # ======================================================
++    # 3. build model
++    # ======================================================
++    (
++        model,
++        ema,
++        ema_shape_dict,
++        discriminator,
++        vae_loss_fn,
++        generator_loss_fn,
++        discriminator_loss_fn,
++        optimizer,
++        lr_scheduler,
++        disc_optimizer,
++        disc_lr_scheduler,
++        use_discriminator
++    ) = build_models_and_optimizers(cfg, device, dtype, num_steps_per_epoch, logger)
++
++    # =======================================================
++    # 4. distributed training preparation with colossalai
++    # =======================================================
++    logger.info("Preparing for distributed training...")
++    # == boosting ==
++    torch.set_default_dtype(dtype)
++    model, optimizer, _, dataloader, lr_scheduler = booster.boost(
++        model=model,
++        optimizer=optimizer,
++        lr_scheduler=lr_scheduler,
++        dataloader=dataloader,
++    )
++
++    if use_discriminator:
++        discriminator, disc_optimizer, _, _, disc_lr_scheduler = booster.boost(
++            model=discriminator,
++            optimizer=disc_optimizer,
++            lr_scheduler=disc_lr_scheduler,
++        )
++    torch.set_default_dtype(torch.float)
++    logger.info("Boosted model for distributed training")
++
++    # =======================================================
++    # 5. training loop
++    # =======================================================
++    train_loop(
++        cfg,
++        booster,
++        model,
++        ema,
++        ema_shape_dict,
++        discriminator,
++        vae_loss_fn,
++        generator_loss_fn,
++        discriminator_loss_fn,
++        optimizer,
++        lr_scheduler,
++        disc_optimizer,
++        disc_lr_scheduler,
++        dataloader,
++        sampler,
++        num_steps_per_epoch,
++        cache_pin_memory,
++        device,
++        dtype,
++        coordinator,
++        logger,
++        tb_writer,
++        checkpoint_io,
++        exp_dir,
++        plugin_type,
++        plugin_config,
++        use_discriminator,
++        my_schedule,
++    )
++
+
+ if __name__ == "__main__":
+     main()
