@@ -202,9 +202,18 @@ def _read_from_stream(
     # some files don't seek to the right location, so better be safe here
     seek_offset = max(seek_offset - 1, 0)
     if should_buffer:
-        # FIXME this is kind of a hack, but we will jump to the previous keyframe
-        # so this will be safe
-        seek_offset = max(seek_offset - max_buffer_size, 0)
+        # Convert max_buffer_size frames to PTS margin
+        pts_margin = max_buffer_size
+        if (
+            stream.average_rate is not None
+            and stream.average_rate > 0
+            and stream.time_base is not None
+        ):
+            pts_per_frame = (
+                1 / float(stream.average_rate)
+            ) * (1 / float(stream.time_base))
+            pts_margin = int(math.ceil(max_buffer_size * pts_per_frame))
+        seek_offset = max(seek_offset - pts_margin, 0)
     try:
         # TODO check if stream needs to always be the video stream here or not
         container.seek(seek_offset, any_frame=False, backward=True, stream=stream)
