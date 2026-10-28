@@ -12,14 +12,11 @@ from torch._utils import ExceptionWrapper
 from torch.distributed import ProcessGroup
 from torch.utils.data import DataLoader, _utils
 from torch.utils.data._utils import MP_STATUS_CHECK_INTERVAL
-from torch.utils.data.dataloader import (
-    IterDataPipe,
-    MapDataPipe,
-    _BaseDataLoaderIter,
-    _MultiProcessingDataLoaderIter,
-    _sharding_worker_init_fn,
-    _SingleProcessDataLoaderIter,
-)
+from torch.utils.data.dataloader import (IterDataPipe, MapDataPipe,
+                                         _BaseDataLoaderIter,
+                                         _MultiProcessingDataLoaderIter,
+                                         _sharding_worker_init_fn,
+                                         _SingleProcessDataLoaderIter)
 
 from opensora.acceleration.parallel_states import get_data_parallel_group
 from opensora.registry import DATASETS, build_module
@@ -34,7 +31,13 @@ from .sampler import DistributedSampler, VariableVideoBatchSampler
 
 
 def _pin_memory_loop(
-    in_queue, out_queue, device_id, done_event, device, pin_memory_cache: PinMemoryCache, pin_memory_key: str
+    in_queue,
+    out_queue,
+    device_id,
+    done_event,
+    device,
+    pin_memory_cache: PinMemoryCache,
+    pin_memory_key: str,
 ):
     # This setting is thread local, and prevents the copy in pin_memory from
     # consuming all CPU cores.
@@ -63,7 +66,9 @@ def _pin_memory_loop(
                     pin_memory_value.copy_(val)
                     data[pin_memory_key] = pin_memory_value
             except Exception:
-                data = ExceptionWrapper(where=f"in pin memory thread for device {device_id}")
+                data = ExceptionWrapper(
+                    where=f"in pin memory thread for device {device_id}"
+                )
             r = (idx, data)
         while not done_event.is_set():
             try:
@@ -103,7 +108,10 @@ class _MultiProcessingDataLoaderIterForVideo(_MultiProcessingDataLoaderIter):
         #   Additional worker init function will take care of sharding in MP and Distributed
         if isinstance(self._dataset, (IterDataPipe, MapDataPipe)):
             self._worker_init_fn = functools.partial(
-                _sharding_worker_init_fn, self._worker_init_fn, self._world_size, self._rank
+                _sharding_worker_init_fn,
+                self._worker_init_fn,
+                self._world_size,
+                self._rank,
             )
 
         # No certainty which module multiprocessing_context is
@@ -158,7 +166,9 @@ class _MultiProcessingDataLoaderIterForVideo(_MultiProcessingDataLoaderIter):
             if self._pin_memory_device == "xpu":
                 current_device = torch.xpu.current_device()  # type: ignore[attr-defined]
             elif self._pin_memory_device == torch._C._get_privateuse1_backend_name():
-                custom_device_mod = getattr(torch, torch._C._get_privateuse1_backend_name())
+                custom_device_mod = getattr(
+                    torch, torch._C._get_privateuse1_backend_name()
+                )
                 current_device = custom_device_mod.current_device()
             else:
                 current_device = torch.cuda.current_device()  # choose cuda for default
@@ -320,20 +330,13 @@ def collate_fn_default(batch):
     batch = [x for x in batch if x is not None]
     assert len(batch) > 0, "batch is empty"
 
-    # HACK: for loading text features
-    use_mask = False
-    if "mask" in batch[0] and isinstance(batch[0]["mask"], int):
-        masks = [x.pop("mask") for x in batch]
-
-        texts = [x.pop("text") for x in batch]
-        texts = torch.cat(texts, dim=1)
-        use_mask = True
+    use_mask = "mask" in batch[0] and isinstance(batch[0]["mask"], int)
 
     ret = torch.utils.data.default_collate(batch)
 
     if use_mask:
-        ret["mask"] = masks
-        ret["text"] = texts
+        ret["mask"] = ret["mask"].tolist()
+        ret["text"] = torch.cat(list(ret["text"]), dim=1)
     return ret
 
 
